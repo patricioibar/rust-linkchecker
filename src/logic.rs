@@ -63,16 +63,17 @@ pub async fn collect_urls(
         };
         let mut i = 0;
         // search for the start of an url
+        let line = line.as_bytes();
         while i < line.len() {
-            if line[i..].starts_with("http://")
-                || line[i..].starts_with("https://")
-                || line[i..].starts_with("www.")
+            if line[i..].starts_with(b"http://")
+                || line[i..].starts_with(b"https://")
+                || line[i..].starts_with(b"www.")
             {
                 // search for the end of the url
                 let mut j = i + 1;
                 while j < line.len() {
                     let is_end_character =
-                        line.chars().nth(j) == Some(' ') || line.chars().nth(j) == Some(')');
+                        line.get(j) == Some(&b' ') || line.get(j) == Some(&b')');
                     if is_end_character {
                         break;
                     }
@@ -80,9 +81,11 @@ pub async fn collect_urls(
                 }
                 // send url string to request workers
                 // eprintln!("url found in text: {}", &line[i..j]);
-                if url_sender.send(line[i..j].to_owned()).await.is_err() {
-                    break;
-                };
+                if let Ok(s) = String::from_utf8(line[i..j].to_owned()) {
+                    if url_sender.send(s).await.is_err() {
+                        break;
+                    };
+                }
                 i = j;
             }
             i += 1;
