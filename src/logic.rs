@@ -1,19 +1,16 @@
-use std::{error::Error, sync::Arc};
 use futures::future::join_all;
+use std::sync::Arc;
 
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::join;
 use tokio::sync::Mutex;
-
-use tokio::io::{
-    AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt,
-};
 use tokio::sync::mpsc::{self, Receiver, Sender};
 
 pub async fn process_file(
-    input: impl AsyncBufRead + Send + Unpin,
-    output: impl AsyncWrite + Send + Unpin,
+    input: impl AsyncBufRead + Unpin,
+    output: impl AsyncWrite + Unpin,
     number_of_workers: usize,
-) -> Result<(), Box<dyn Error>> {
+) {
     // spawn input file reader
     let (url_sender, url_receiver) = mpsc::channel(100);
     let input_task = collect_urls(input, url_sender);
@@ -23,42 +20,32 @@ pub async fn process_file(
     let mut query_tasks = vec![];
     let url_receiver = Arc::new(Mutex::new(url_receiver));
     for _ in 0..number_of_workers {
-        query_tasks.push(request_urls(
-            url_receiver.clone(),
-            titles_sender.clone(),
-        ));
+        query_tasks.push(request_urls(url_receiver.clone(), titles_sender.clone()));
     }
-    // drop the original `titles_sender` so that only the worker clones remain;
-    // when all workers finish and drop their clones, `titles_receiver` will close
+    // must drop the original sender to close the channel when all workers are done
     drop(titles_sender);
-    drop(url_receiver); // must drop this clone so that request_urls tasks can finish when the channel is closed
 
     // spawn output file writer
-    let output_task =write_output(output, titles_receiver);
+    let output_task = write_output(output, titles_receiver);
 
     // await for tasks to finish
     join!(input_task, join_all(query_tasks), output_task);
-    Ok(())
 }
 
-pub async fn collect_urls(
-    mut input: impl AsyncBufRead + Send + Unpin,
-    url_sender: Sender<String>,
-) {
+pub async fn collect_urls(mut input: impl AsyncBufRead + Unpin, url_sender: Sender<String>) {
     // in each line, search for one or many urls
     loop {
         let mut line = String::new();
-        match input.read_line(&mut line).await {
-            Ok(s) => {
-                if s == 0 {
-                    break;
-                }
-            }
-            Err(e) => {
-                eprintln!("error reading input: {}", e);
-                continue;
-            }
+        let Ok(s) = input
+            .read_line(&mut line)
+            .await
+            .inspect_err(|e| eprintln!("error reading input: {}", e))
+        else {
+            continue;
         };
+        if s == 0 {
+            break;
+        }
         let mut i = 0;
         // search for the start of an url
         let line = line.as_bytes();
@@ -70,19 +57,17 @@ pub async fn collect_urls(
                 // search for the end of the url
                 let mut j = i + 1;
                 while j < line.len() {
-                    let is_end_character =
-                        line.get(j) == Some(&b' ') || line.get(j) == Some(&b')');
+                    let is_end_character = line.get(j) == Some(&b' ') || line.get(j) == Some(&b')');
                     if is_end_character {
                         break;
                     }
                     j += 1;
                 }
                 // send url string to request workers
-                // eprintln!("url found in text: {}", &line[i..j]);
                 if let Ok(s) = String::from_utf8(line[i..j].to_owned()) {
                     if url_sender.send(s).await.is_err() {
                         break;
-                    };
+                    }
                 }
                 i = j;
             }
@@ -97,43 +82,29 @@ pub async fn request_urls(
 ) {
     loop {
         // receive an url from input reader
-        let mut guard = url_receiver.lock().await;
-        let url = guard.recv().await;
-        drop(guard);
-        let url = if let Some(url) = url {
-            url
-        } else {
+        let Some(url) = url_receiver.lock().await.recv().await else {
             break;
         };
         // get request to that url to get <title> section
-        let response = match reqwest::get(&url).await {
-            Ok(r) => r,
-            Err(e) => {
-                if titles_sender
-                    .send((format!("Error in GET request: {:?}", e).to_owned(), url))
-                    .await
-                    .is_err()
-                {
-                    break;
-                }
-                continue;
+        let Ok(response) = reqwest::get(&url).await else {
+            if titles_sender
+                .send((format!("Error in GET request").to_owned(), url))
+                .await
+                .is_err()
+            {
+                break;
             }
+            continue;
         };
-        let body = match response.text().await {
-            Ok(t) => t,
-            Err(e) => {
-                if titles_sender
-                    .send((
-                        format!("Error getting text from request: {:?}", e).to_owned(),
-                        url,
-                    ))
-                    .await
-                    .is_err()
-                {
-                    break;
-                }
-                continue;
+        let Ok(body) = response.text().await else {
+            if titles_sender
+                .send((format!("Error getting text from request").to_owned(), url))
+                .await
+                .is_err()
+            {
+                break;
             }
+            continue;
         };
         // scan body for <title> section
         // search for the start of an url
@@ -154,11 +125,11 @@ pub async fn write_output(
     mut titles_receiver: Receiver<(String, String)>,
 ) {
     loop {
-        let (title, url) = match titles_receiver.recv().await {
-            Some(t) => t,
-            None => break,
+        let Some((title, url)) = titles_receiver.recv().await else {
+            break;
         };
-        let line = format!("[{}]({})\n", title.trim(), url.trim());
+        let title_clean = title.split_whitespace().collect::<Vec<&str>>().join(" ");
+        let line = format!("[{}]({})\n", title_clean, url.trim());
         if let Err(e) = output.write_all(line.as_bytes()).await {
             eprintln!("error writing output: {}", e)
         }
