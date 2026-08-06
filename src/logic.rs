@@ -7,11 +7,10 @@ use tokio::io::{
 };
 use tokio::sync::mpsc::{self, Receiver, Sender};
 
-const NUMBER_OF_REQUEST_WORKERS: usize = 32;
-
 pub async fn process_file(
     input: impl AsyncBufRead + Send + Unpin + 'static,
     output: impl AsyncWrite + Send + Unpin + 'static,
+    number_of_workers: usize,
 ) -> Result<(), Box<dyn Error>> {
     // spawn input file reader
     let (url_sender, url_receiver) = mpsc::channel(100);
@@ -21,7 +20,7 @@ pub async fn process_file(
     let (titles_sender, titles_receiver) = mpsc::channel(100);
     let mut query_tasks_handles = vec![];
     let url_receiver = Arc::new(Mutex::new(url_receiver));
-    for _ in 0..NUMBER_OF_REQUEST_WORKERS {
+    for _ in 0..number_of_workers {
         query_tasks_handles.push(tokio::task::spawn(request_urls(
             url_receiver.clone(),
             titles_sender.clone(),
