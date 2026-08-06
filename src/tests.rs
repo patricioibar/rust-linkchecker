@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, sync::Arc};
+    use std::collections::HashMap;
 
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
@@ -10,12 +10,26 @@ mod tests {
     use crate::logic::process_file;
 
     #[tokio::test]
+    async fn test_non_existent_url_reports_get_error() {
+        let input = "www.non-existent.com\n";
+        let output = run_process_file(input, 1).await;
+
+        assert!(output.contains("www.non-existent.com"));
+        assert!(output.contains("Error in GET request"));
+    }
+
+    #[tokio::test]
+    async fn test_no_urls_in_input_results_in_no_output() {
+        let input = "This line has no URLs.\n";
+        let output = run_process_file(input, 1).await;
+
+        assert_eq!(output, "");
+    }
+
+    #[tokio::test]
     async fn test_single_url_extracts_title() {
         let mut responses = HashMap::new();
-        responses.insert(
-            "/title".to_owned(),
-            b"<html><head><title>Example Title</title></head><body>Hello</body></html>".to_vec(),
-        );
+        responses.insert("/title".to_owned(), html("Example Title"));
         let (base_url, server) = spawn_http_server(responses, 1).await;
 
         let input = format!("{}/title\n", base_url);
@@ -30,14 +44,8 @@ mod tests {
     #[tokio::test]
     async fn test_multiple_urls_are_extracted_from_one_line() {
         let mut responses = HashMap::new();
-        responses.insert(
-            "/first".to_owned(),
-            b"<html><head><title>First Title</title></head></html>".to_vec(),
-        );
-        responses.insert(
-            "/second".to_owned(),
-            b"<title>Second Title</title></head></html>".to_vec(),
-        );
+        responses.insert("/first".to_owned(), html("First Title"));
+        responses.insert("/second".to_owned(), html("Second Title"));
         let (base_url, server) = spawn_http_server(responses, 2).await;
 
         let input = format!(
@@ -60,10 +68,7 @@ mod tests {
     #[tokio::test]
     async fn test_missing_title_uses_default_text() {
         let mut responses = HashMap::new();
-        responses.insert(
-            "/plain".to_owned(),
-            b"<html><body>No title here</body></html>".to_vec(),
-        );
+        responses.insert("/plain".to_owned(), b"No title here".to_vec());
         let (base_url, server) = spawn_http_server(responses, 1).await;
 
         let input = format!("{}/plain\n", base_url);
@@ -89,21 +94,12 @@ mod tests {
         assert!(output.contains("No title found"));
     }
 
-    #[tokio::test]
-    async fn test_non_existent_url_reports_get_error() {
-        let input = "www.non-existent.com\n";
-        let output = run_process_file(input, 1).await;
-
-        assert!(output.contains("www.non-existent.com"));
-        assert!(output.contains("Error in GET request"));
-    }
-
-    #[tokio::test]
-    async fn test_no_urls_in_input_results_in_no_output() {
-        let input = "This line has no URLs.\n";
-        let output = run_process_file(input, 1).await;
-
-        assert_eq!(output, "");
+    fn html(title: &str) -> Vec<u8> {
+        format!(
+            "<html><head><title>{}</title></head><body>Hello</body></html>",
+            title
+        )
+        .into_bytes()
     }
 
     async fn run_process_file(input: &str, number_of_workers: usize) -> String {
@@ -132,12 +128,10 @@ mod tests {
     ) -> (String, tokio::task::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let responses = Arc::new(responses);
 
         let handle = tokio::spawn(async move {
             for _ in 0..expected_requests {
                 let (mut socket, _) = listener.accept().await.unwrap();
-                let responses = responses.clone();
 
                 let mut request = Vec::new();
                 let mut buffer = [0_u8; 1024];
@@ -162,7 +156,6 @@ mod tests {
                     .nth(1)
                     .unwrap_or("/")
                     .to_owned();
-
                 let body = responses
                     .get(&path)
                     .cloned()
