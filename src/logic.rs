@@ -1,5 +1,7 @@
 use std::{error::Error, sync::Arc};
+use futures::future::join_all;
 
+use tokio::join;
 use tokio::sync::Mutex;
 
 use tokio::io::{
@@ -8,23 +10,23 @@ use tokio::io::{
 use tokio::sync::mpsc::{self, Receiver, Sender};
 
 pub async fn process_file(
-    input: impl AsyncBufRead + Send + Unpin + 'static,
-    output: impl AsyncWrite + Send + Unpin + 'static,
+    input: impl AsyncBufRead + Send + Unpin,
+    output: impl AsyncWrite + Send + Unpin,
     number_of_workers: usize,
 ) -> Result<(), Box<dyn Error>> {
     // spawn input file reader
     let (url_sender, url_receiver) = mpsc::channel(100);
-    tokio::task::spawn(async move { collect_urls(input, url_sender).await });
+    let input_task = collect_urls(input, url_sender);
 
     // spawn url requesters
     let (titles_sender, titles_receiver) = mpsc::channel(100);
-    let mut query_tasks_handles = vec![];
+    let mut query_tasks = vec![];
     let url_receiver = Arc::new(Mutex::new(url_receiver));
     for _ in 0..number_of_workers {
-        query_tasks_handles.push(tokio::task::spawn(request_urls(
+        query_tasks.push(request_urls(
             url_receiver.clone(),
             titles_sender.clone(),
-        )));
+        ));
     }
     // drop the original `titles_sender` so that only the worker clones remain;
     // when all workers finish and drop their clones, `titles_receiver` will close
@@ -32,19 +34,15 @@ pub async fn process_file(
     drop(url_receiver); // must drop this clone so that request_urls tasks can finish when the channel is closed
 
     // spawn output file writer
-    let output_writer_handle =
-        tokio::task::spawn(async move { write_output(output, titles_receiver).await });
+    let output_task =write_output(output, titles_receiver);
 
     // await for tasks to finish
-    for future in query_tasks_handles {
-        let _ = future.await;
-    }
-    output_writer_handle.await?;
+    join!(input_task, join_all(query_tasks), output_task);
     Ok(())
 }
 
 pub async fn collect_urls(
-    mut input: impl AsyncBufRead + Send + Unpin + 'static,
+    mut input: impl AsyncBufRead + Send + Unpin,
     url_sender: Sender<String>,
 ) {
     // in each line, search for one or many urls
